@@ -23,6 +23,8 @@ import com.couchbase.client.core.CouchbaseException;
 import com.couchbase.client.core.RequestCancelledException;
 import com.couchbase.client.core.annotations.InterfaceAudience;
 import com.couchbase.client.core.annotations.InterfaceStability;
+import com.couchbase.client.core.lang.Tuple2;
+import com.couchbase.client.core.message.kv.UpsertRequest;
 import com.couchbase.client.java.analytics.AnalyticsQuery;
 import com.couchbase.client.java.analytics.AsyncAnalyticsQueryResult;
 import com.couchbase.client.java.bucket.AsyncBucketManager;
@@ -598,6 +600,12 @@ public interface AsyncBucket {
      * @return an {@link Observable} eventually containing a new {@link Document}.
      */
     <D extends Document<?>> Observable<D> insert(D document, ReplicateTo replicateTo);
+
+    @SuppressWarnings("unchecked")
+    <D extends Document<?>> Tuple2<Observable<D>, UpsertRequest> upsertWithRequest(D document);
+
+    <D extends Document<?>> Tuple2<Observable<D>, UpsertRequest> upsertWithRequest(D document, PersistTo persistTo,
+                                                                                   ReplicateTo replicateTo);
 
     /**
      * Insert or overwrite a {@link Document}.

@@ -21,6 +21,7 @@ import java.util.concurrent.TimeUnit;
 
 import com.couchbase.client.core.ClusterFacade;
 import com.couchbase.client.core.CouchbaseException;
+import com.couchbase.client.core.lang.Tuple;
 import com.couchbase.client.core.lang.Tuple2;
 import com.couchbase.client.core.logging.CouchbaseLogger;
 import com.couchbase.client.core.logging.CouchbaseLoggerFactory;
@@ -543,6 +544,80 @@ public class CouchbaseAsyncBucket implements AsyncBucket {
         });
     }
 
+    @Override
+    @SuppressWarnings("unchecked")
+    public <D extends Document<?>> Tuple2<Observable<D>, UpsertRequest> upsertWithRequest(final D document) {
+        final  Transcoder<Document<Object>, Object> transcoder = (Transcoder<Document<Object>, Object>) transcoders.get(document.getClass());
+        Tuple2<ByteBuf, Integer> encoded = transcoder.encode((Document<Object>) document);
+        final UpsertRequest request = new UpsertRequest(document.id(), encoded.value1(), document.expiry(), encoded.value2(), bucket);
+
+        return Tuple.create(deferAndWatch(new Func1<Subscriber, Observable<UpsertResponse>>() {
+            @Override
+            public Observable<UpsertResponse> call(Subscriber s) {
+                request.subscriber(s);
+                return core.send(request);
+            }
+        }).map(new Func1<UpsertResponse, D>() {
+            @Override
+            public D call(UpsertResponse response) {
+                if (response.content() != null && response.content().refCnt() > 0) {
+                    response.content().release();
+                }
+
+                if (response.status().isSuccess()) {
+                    return (D) transcoder.newDocument(document.id(), document.expiry(),
+                            document.content(), response.cas(), response.mutationToken());
+                }
+
+                switch (response.status()) {
+                    case TOO_BIG:
+                        throw addDetails(new RequestTooBigException(), response);
+                    case EXISTS:
+                        throw addDetails(new CASMismatchException(), response);
+                    case TEMPORARY_FAILURE:
+                    case SERVER_BUSY:
+                        throw addDetails(new TemporaryFailureException(), response);
+                    case OUT_OF_MEMORY:
+                        throw addDetails(new CouchbaseOutOfMemoryException(), response);
+                    default:
+                        throw addDetails(new CouchbaseException(response.status().toString()), response);
+                }
+            }
+        }), request);
+    }
+
+    @Override
+    public <D extends Document<?>> Tuple2<Observable<D>, UpsertRequest> upsertWithRequest(final D document, final PersistTo persistTo,
+                                                                               final ReplicateTo replicateTo) {
+        Tuple2<Observable<D>, UpsertRequest> upsertResult = upsertWithRequest(document);
+
+        if (persistTo == PersistTo.NONE && replicateTo == ReplicateTo.NONE) {
+            return upsertResult;
+        }
+
+        return Tuple.create(upsertResult.value1().flatMap(new Func1<D, Observable<D>>() {
+            @Override
+            public Observable<D> call(final D doc) {
+                return Observe
+                        .call(core, bucket, doc.id(), doc.cas(), false, doc.mutationToken(), persistTo.value(), replicateTo.value(),
+                                environment.observeIntervalDelay(), environment.retryStrategy())
+                        .map(new Func1<Boolean, D>() {
+                            @Override
+                            public D call(Boolean aBoolean) {
+                                return doc;
+                            }
+                        })
+                        .onErrorResumeNext(new Func1<Throwable, Observable<? extends D>>() {
+                            @Override
+                            public Observable<? extends D> call(Throwable throwable) {
+                                return Observable.error(new DurabilityException(
+                                        "Durability requirement failed: " + throwable.getMessage(),
+                                        throwable));
+                            }
+                        });
+            }
+        }), upsertResult.value2());
+    }
     @Override
     @SuppressWarnings("unchecked")
     public <D extends Document<?>> Observable<D> upsert(final D document) {
